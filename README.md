@@ -1,122 +1,281 @@
-# Notion Knowledge Finder
+# Notion AI Knowledge Assistant
 
-面向公司内部知识的 RAG 搜索助手：同步有权限访问的 Notion 页面，使用向量检索找出相关段落，再通过 LangGraph 控制“回答 / 拒答”路径。回答附带可点击的 Notion 原文链接。
+[English](README.md) | [繁體中文](README.zh.md)
 
-## 1. 配置 Notion
+A working full-stack Retrieval-Augmented Generation application for company knowledge. It ingests authorized Notion pages, converts the content into a searchable vector index, and generates source-cited answers through semantic retrieval and a large language model.
 
-1. 在 Notion 的 **Settings → Connections / Integrations** 创建 Internal Integration。
-2. 将需要搜索的页面或 Teamspace 共享给该 Integration；API 只能读取明确授权的内容。
-3. 复制 `.env.example` 为 `.env`，填写 `NOTION_API_KEY`，然后选择 OpenAI 或 Gemini。
+> **Project status:** Full-stack MVP completed · Actively improving
 
-### 使用 Gemini（推荐先用这个跑通）
+![Notion AI Knowledge Assistant chat interface](docs/assets/knowledge-assistant-chat.jpg)
 
-```env
-CHAT_PROVIDER=gemini
-EMBEDDING_PROVIDER=gemini
-GOOGLE_API_KEY=替换成新生成的_Key
+## Highlights
 
-GEMINI_CHAT_MODEL=gemini-flash-latest
-GEMINI_EMBEDDING_MODEL=models/gemini-embedding-001
+- Built an end-to-end **Notion → Chunking → Embedding → Chroma → LLM** RAG pipeline.
+- Developed a **React + TypeScript** interface for chat, indexed documents, sync jobs, and runtime settings.
+- Exposed versioned **FastAPI REST APIs** with a layered Controller, Service, Infrastructure, and RAG architecture.
+- Used **LangGraph** to orchestrate retrieval, evidence evaluation, and answer/no-answer routing to reduce unsupported responses.
+- Persisted conversations, messages, citations, document states, and sync jobs with **SQLAlchemy and Alembic**.
+- Supported zero-configuration **SQLite** development and optional **PostgreSQL** deployment, while keeping vector search in Chroma.
+- Added **LangChain provider adapters** for configurable Gemini/OpenAI chat and embedding models.
+- Returned Notion links, excerpts, and relevance scores so users can verify the evidence behind each answer.
+
+## Problem
+
+Company knowledge is often distributed across hundreds of Notion pages. Employees may know that information exists without remembering the exact title or location, while keyword search performs poorly when a question and a document use different wording.
+
+This application maps questions and document chunks into the same semantic vector space. Chroma retrieves the most relevant content, and LangGraph checks the retrieval score before allowing the language model to answer. When the evidence is insufficient, the workflow explicitly refuses to invent an answer.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U[React + TypeScript] -->|REST API| A[FastAPI]
+    A --> S[Application Services]
+    S --> D[(SQLite / PostgreSQL)]
+    S --> G[LangGraph RAG Workflow]
+
+    N[Notion API] --> P[Block / Table Parser]
+    P --> C[Text Chunking]
+    C --> E[Gemini / OpenAI Embedding]
+    E --> V[(Chroma Vector DB)]
+
+    G --> Q[Query Embedding]
+    Q --> V
+    V -->|Top-K Chunks| G
+    G --> L[Gemini / OpenAI Chat]
+    L -->|Answer + Citations| A
 ```
 
-API Key 只放在本地 `.env`，不要提交到 Git、写入源代码或粘贴到聊天记录。Key 一旦公开，
-应立即在 Google AI Studio 中删除并重新生成。
+### Ingestion pipeline
 
-### 使用 OpenAI
-
-```env
-CHAT_PROVIDER=openai
-EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=替换成你的_Key
-
-OPENAI_CHAT_MODEL=gpt-5-mini
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+```text
+Notion API
+→ Parse pages, nested blocks, and tables
+→ Normalize and split text into chunks
+→ Generate embeddings
+→ Store vectors, source text, and metadata in Chroma
+→ Store document and sync state in the relational database
 ```
 
-聊天和 Embedding 可使用不同供应商。例如 Gemini 负责回答、OpenAI 负责向量化：
+### Question-answering pipeline
 
-```env
-CHAT_PROVIDER=gemini
-EMBEDDING_PROVIDER=openai
-GOOGLE_API_KEY=替换成你的_Gemini_Key
-OPENAI_API_KEY=替换成你的_OpenAI_Key
+```text
+User question
+→ Query embedding
+→ Chroma cosine-similarity search
+→ LangGraph relevance threshold
+→ Insufficient evidence: refuse to answer
+→ Sufficient evidence: send Top-K chunks to the chat model
+→ Return answer, Notion sources, and relevance scores
 ```
 
-修改 `EMBEDDING_PROVIDER` 或 Embedding 模型后，必须再次“同步 Notion”，重建 Chroma
-中的文档向量。同一个 collection 不能混用不同模型生成的向量。
+## Technology Stack
 
-## 2. 启动
+| Layer | Technologies | Responsibility |
+| --- | --- | --- |
+| Frontend | React 19, TypeScript, Vite | Chat, documents, sync, and settings UI |
+| Client state | TanStack Query, React Router | Server-state caching, mutations, and routing |
+| Backend | Python, FastAPI, Pydantic | REST APIs, DTO validation, and dependencies |
+| AI orchestration | LangGraph, LangChain | RAG control flow and provider abstraction |
+| LLM / Embedding | Gemini or OpenAI | Answer generation and semantic vectors |
+| Vector database | Chroma | Chunks, metadata, embeddings, and similarity search |
+| Application database | SQLite or PostgreSQL | Conversations, messages, documents, citations, and jobs |
+| Persistence | SQLAlchemy, Alembic | ORM and database migrations |
+| Integration | Notion API, HTTPX | Authorized page and block ingestion |
+| Quality | Pytest, Ruff, TypeScript compiler | Unit tests, linting, and type checking |
 
-使用 `uv`：
+## Features
 
-```bash
-uv sync --extra dev
-uv run uvicorn notion_knowledge_finder.api:app --reload
+### Knowledge chat
+
+- Create and persist multiple conversations
+- Retain user and assistant message history
+- Indicate whether an answer has sufficient supporting evidence
+- Display Notion sources, excerpts, and relevance scores
+
+### Notion synchronization
+
+- Read only pages explicitly shared with the Notion integration
+- Parse paragraphs, headings, nested blocks, and table rows
+- Track sync jobs through `pending → running → completed / failed`
+- Record page count, chunk count, and provider errors
+
+### Document visibility
+
+- List indexed Notion pages
+- Show each page's chunk count and last-edited timestamp
+- Open the original Notion source directly
+
+### Model and storage configuration
+
+- Configure chat and embedding providers independently as Gemini or OpenAI
+- Run locally with embedded Chroma and SQLite without separate services
+- Switch the application database to PostgreSQL through Docker Compose
+
+## REST API
+
+```text
+GET    /api/v1/health
+GET    /api/v1/conversations
+POST   /api/v1/conversations
+GET    /api/v1/conversations/{id}
+DELETE /api/v1/conversations/{id}
+POST   /api/v1/conversations/{id}/messages
+GET    /api/v1/documents
+GET    /api/v1/sync-jobs
+POST   /api/v1/sync-jobs
+GET    /api/v1/sync-jobs/{id}
 ```
 
-如果尚未安装 `uv`，也可以使用标准 Python：
+FastAPI Swagger UI: <http://localhost:8000/docs>
+
+## Quick Start
+
+### 1. Requirements
+
+- Python 3.11+
+- Node.js 20+
+- A Gemini or OpenAI API key
+- A read-only Notion Developer Connection API token
+
+### 2. Install
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
-uvicorn notion_knowledge_finder.api:app --reload
+python -m pip install -e ".[dev]"
+cp .env.example .env
+
+cd frontend
+npm install
+cd ..
 ```
 
-另开一个终端启动界面：
+If `.env` already exists, do not copy the example again because it would overwrite local credentials.
+
+### 3. Configure `.env`
+
+```env
+CHAT_PROVIDER=gemini
+EMBEDDING_PROVIDER=gemini
+GOOGLE_API_KEY=your_Gemini_API_key
+NOTION_API_KEY=your_Notion_API_token
+
+DATABASE_URL=sqlite:///./.data/app.db
+CORS_ORIGINS=http://localhost:5173
+GEMINI_CHAT_MODEL=gemini-flash-latest
+GEMINI_EMBEDDING_MODEL=models/gemini-embedding-001
+CHROMA_PATH=.data/chroma
+MIN_RELEVANCE_SCORE=0.32
+```
+
+Keep secrets only in the local `.env`. Never commit `.env`, API keys, or `.data/`.
+
+### 4. Start the backend
 
 ```bash
-uv run streamlit run frontend/streamlit_app.py  # 使用 uv
-# 或 streamlit run frontend/streamlit_app.py    # 使用已激活的 venv
+source .venv/bin/activate
+python -m uvicorn notion_knowledge_finder.main:app --reload
 ```
 
-打开 http://localhost:8501，先点击侧边栏的“同步 Notion”，然后开始提问。
+Backend: <http://localhost:8000>
 
-也可以直接调用 API：
+### 5. Start the frontend
 
 ```bash
-curl -X POST http://localhost:8000/sync
-curl -X POST http://localhost:8000/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"报销流程是什么？"}'
+cd frontend
+npm run dev
 ```
 
-## 架构
+Frontend: <http://localhost:5173>
+
+Open **Notion Sync** to create the first index, then use **Knowledge Chat** to ask questions.
+
+## Optional PostgreSQL Setup
+
+SQLite is the default and requires no separate service. To use PostgreSQL:
+
+```bash
+docker compose up -d postgres
+```
+
+Update `.env`:
+
+```env
+DATABASE_URL=postgresql+psycopg://notion:notion@localhost:5432/notion_finder
+```
+
+Run the migration:
+
+```bash
+source .venv/bin/activate
+alembic upgrade head
+```
+
+## Project Structure
 
 ```text
-Notion API → 递归读取页面 blocks → 分块 → 可选 Embeddings → Chroma
-                                                             ↓
-用户问题 → 向量检索 → 相关度门槛 → LangGraph → 可选聊天模型 → 引用式回答 / 明确拒答
+frontend/
+├── src/api/                        REST client
+├── src/components/                 Application shell
+├── src/pages/                      Chat / Documents / Sync / Settings
+└── src/styles/                     Responsive UI
+
+src/notion_knowledge_finder/
+├── api/
+│   ├── routes/                     FastAPI controllers
+│   └── schemas/                    Request / response DTOs
+├── application/
+│   ├── chat_service.py             Conversation + RAG use case
+│   ├── ingestion.py                Chunking and ingestion
+│   └── sync_service.py             Sync jobs and document state
+├── infrastructure/
+│   ├── ai/                         LangChain provider adapters
+│   ├── database/                   SQLAlchemy models and connection
+│   ├── notion/                     Notion API client
+│   └── vector/                     Chroma knowledge index
+├── rag/graph.py                    LangGraph workflow
+├── config.py                       Environment configuration
+└── main.py                         FastAPI entry point
+
+migrations/                         Alembic migrations
+tests/                              Unit tests
+docker-compose.yml                  Optional PostgreSQL service
 ```
 
-## 目录结构
-
-```text
-frontend/                      Streamlit 前端
-scripts/                       独立运维脚本
-src/notion_knowledge_finder/   后端 Python 包
-├── api.py                     FastAPI 接口与依赖生命周期
-├── config.py                  环境配置
-├── ingestion.py               文本分块与同步流程
-├── models.py                  API 数据模型
-├── notion.py                  Notion API 集成
-├── providers.py               OpenAI / Gemini 模型工厂
-├── retrieval.py               Chroma 检索索引
-└── workflow.py                LangGraph RAG 工作流
-tests/
-├── unit/                      单元测试
-└── integration/               集成测试
-```
-
-不启动 API 也可以单独同步：
+## Verification
 
 ```bash
-uv run python scripts/sync_notion.py
+source .venv/bin/activate
+python -m pytest -q
+ruff check src tests migrations
+
+cd frontend
+npm run build
 ```
 
-## 上生产前建议
+Current verification results:
 
-- 将“全量重建”改为按 `last_edited_time` 增量同步，并用定时任务触发。
-- 根据员工身份过滤文档权限；不要让索引扩大用户原有的 Notion 权限。
-- 加入搜索反馈、无结果问题统计和离线检索评测集。
-- 数据量较大时把 Chroma 换为带备份的 pgvector 或 Qdrant。
+- Python unit tests: **9 passed**
+- Ruff lint: **passed**
+- TypeScript type check: **passed**
+- Vite production build: **passed**
+
+## Current Scope and Roadmap
+
+The current release is a complete single-user, single-Notion-workspace MVP. Conversation history is persisted, but earlier messages are not yet used for query rewriting, so the project does not claim full conversational memory.
+
+Planned extensions:
+
+- Notion OAuth and multiple workspaces
+- Authentication, tenant isolation, and document-level ACLs
+- Incremental sync, deletion detection, and Notion 429 retry handling
+- Durable Redis/Celery-style background jobs
+- Streaming responses
+- Hybrid search, reranking, and a RAG evaluation dataset
+
+## Security Notes
+
+- The Notion integration can read only pages explicitly shared with it.
+- `.env`, Chroma data, and the SQLite database are ignored by Git.
+- Prompt instructions are not an authorization mechanism; a multi-user release must enforce ACL filters before retrieval.
